@@ -63,6 +63,15 @@ class DocumentRepository(
         database.strokeDao().updateState(annotationId, state, error)
     }
 
+    suspend fun updateReadingProgress(documentId: String, pageIndex: Int, pageCount: Int) {
+        if (pageCount <= 0) return
+        database.documentDao().updateReadingProgress(
+            documentId = documentId,
+            pageIndex = pageIndex.coerceIn(0, pageCount - 1),
+            pageCount = pageCount,
+        )
+    }
+
     suspend fun removeDocument(id: String) {
         val document = database.documentDao().findById(id) ?: return
         check(pendingStrokes(id).isEmpty()) { "Hay subrayados pendientes de sincronizar" }

@@ -1,5 +1,6 @@
 package com.acaba.pdfreader.ui
 
+import android.content.res.Configuration
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.net.Uri
@@ -14,12 +15,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -48,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -55,6 +62,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
@@ -67,6 +75,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
@@ -102,6 +111,7 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as PdfReaderApplication
     val repository = app.repository
+    val orientation = LocalConfiguration.current.orientation
     val viewerState = rememberPdfViewerState()
     val strokes by repository.observeStrokes(document.id).collectAsStateWithLifecycle(emptyList())
     var openAttempt by rememberSaveable { mutableStateOf(0) }
@@ -139,9 +149,10 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     var highlightMode by rememberSaveable { mutableStateOf(false) }
     var colorArgb by rememberSaveable { mutableStateOf(Yellow.toArgb()) }
     var width by rememberSaveable { mutableStateOf(8f) }
-    var savedPage by rememberSaveable { mutableStateOf(0) }
-    var savedZoom by rememberSaveable { mutableStateOf(1f) }
+    var savedPage by rememberSaveable(document.id) { mutableIntStateOf(document.lastPageIndex) }
+    var savedZoom by rememberSaveable(document.id) { mutableStateOf(1f) }
     var stateRestored by remember { mutableStateOf(false) }
+    var lastOrientation by remember { mutableIntStateOf(orientation) }
     var selectedGlyphs by remember { mutableStateOf<List<TextGlyph>>(emptyList()) }
     var selectedText by remember { mutableStateOf("") }
     var selectionStart by remember { mutableStateOf<Offset?>(null) }
@@ -176,18 +187,32 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(viewerState.firstVisiblePage, viewerState.zoom, pdfDocument) {
+    LaunchedEffect(viewerState.firstVisiblePage, viewerState.zoom, pdfDocument, stateRestored) {
         if (stateRestored && pdfDocument != null) {
-            savedPage = viewerState.firstVisiblePage
+            savedPage = viewerState.firstVisiblePage.coerceIn(0, pdfDocument.pageCount - 1)
             savedZoom = viewerState.zoom
+            repository.updateReadingProgress(document.id, savedPage, pdfDocument.pageCount)
         }
     }
 
     LaunchedEffect(pdfDocument) {
         if (pdfDocument != null) {
+            stateRestored = false
+            savedPage = savedPage.coerceIn(0, pdfDocument.pageCount - 1)
             runCatching { viewerState.scrollToPage(savedPage) }
             viewerState.zoomScroll { zoomTo(savedZoom) }
+            repository.updateReadingProgress(document.id, savedPage, pdfDocument.pageCount)
             stateRestored = true
+        }
+    }
+
+    val pageBeforeRotation = savedPage
+    LaunchedEffect(orientation, pdfDocument) {
+        val orientationChanged = orientation != lastOrientation
+        lastOrientation = orientation
+        if (orientationChanged && stateRestored && pdfDocument != null) {
+            repeat(2) { withFrameNanos { } }
+            viewerState.scrollToPage(pageBeforeRotation.coerceIn(0, pdfDocument.pageCount - 1))
         }
     }
 
@@ -309,7 +334,11 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(8.dp)
+                    .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.End))
+                    .padding(
+                        top = 8.dp,
+                        end = if (orientation == Configuration.ORIENTATION_LANDSCAPE) 48.dp else 8.dp,
+                    )
                     .size(40.dp)
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f), CircleShape),
             ) {

@@ -1,5 +1,6 @@
 package com.acaba.pdfreader.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -24,6 +25,8 @@ data class PdfDocumentEntity(
     val lastModified: Long,
     val importedAt: Long = System.currentTimeMillis(),
     val canWrite: Boolean,
+    @ColumnInfo(defaultValue = "0") val lastPageIndex: Int = 0,
+    @ColumnInfo(defaultValue = "0") val pageCount: Int = 0,
 )
 
 @Entity(

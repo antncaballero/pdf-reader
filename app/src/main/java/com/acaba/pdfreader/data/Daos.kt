@@ -22,6 +22,13 @@ interface DocumentDao {
 
     @Query("DELETE FROM pdf_documents WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query(
+        """UPDATE pdf_documents
+           SET lastPageIndex = :pageIndex, pageCount = :pageCount
+           WHERE id = :documentId""",
+    )
+    suspend fun updateReadingProgress(documentId: String, pageIndex: Int, pageCount: Int)
 }
 
 @Dao

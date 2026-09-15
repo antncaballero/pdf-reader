@@ -10,6 +10,7 @@
         android:theme="@style/Theme.PdfReader">
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:exported="true"
             android:screenOrientation="unspecified">
             <intent-filter>
