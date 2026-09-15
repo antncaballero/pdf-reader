@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.AlertDialog
@@ -67,6 +68,7 @@ fun LibraryScreen(
     onErrorDismiss: () -> Unit,
     onImport: (Uri) -> Unit,
     onOpen: (PdfDocumentEntity) -> Unit,
+    onGoToPage: (PdfDocumentEntity, Int) -> Unit,
     onRemove: (PdfDocumentEntity) -> Unit,
 ) {
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -115,7 +117,7 @@ fun LibraryScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(documents, key = { it.id }) { document ->
-                    DocumentCard(document, onOpen, onRemove)
+                    DocumentCard(document, onOpen, onGoToPage, onRemove)
                 }
             }
         }
@@ -157,10 +159,12 @@ private fun EmptyLibrary(padding: PaddingValues) {
 private fun DocumentCard(
     document: PdfDocumentEntity,
     onOpen: (PdfDocumentEntity) -> Unit,
+    onGoToPage: (PdfDocumentEntity, Int) -> Unit,
     onRemove: (PdfDocumentEntity) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf(false) }
+    var goToPageOpen by remember { mutableStateOf(false) }
     val hasPageCount = document.pageCount > 0
     val currentPage = if (hasPageCount) {
         (document.lastPageIndex + 1).coerceIn(1, document.pageCount)
@@ -214,6 +218,9 @@ private fun DocumentCard(
                         },
                     )
                 }
+                IconButton(onClick = { goToPageOpen = true }) {
+                    Icon(Icons.Default.FindInPage, contentDescription = "Ir a página")
+                }
                 Box {
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "Más opciones")
@@ -251,6 +258,18 @@ private fun DocumentCard(
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
         }
+    }
+
+    if (goToPageOpen) {
+        GoToPageDialog(
+            pageCount = document.pageCount.takeIf { it > 0 },
+            currentPage = currentPage.coerceAtLeast(1),
+            onDismiss = { goToPageOpen = false },
+            onConfirm = { pageIndex ->
+                goToPageOpen = false
+                onGoToPage(document, pageIndex)
+            },
+        )
     }
 
     if (confirmRemove) {

@@ -18,6 +18,7 @@ fun PdfReaderApp() {
     val documents by libraryViewModel.documents.collectAsState()
     val error by libraryViewModel.error.collectAsState()
     var selectedDocumentId by rememberSaveable { mutableStateOf<String?>(null) }
+    var requestedPageIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     val selected = documents.firstOrNull { it.id == selectedDocumentId }
 
     if (selected == null) {
@@ -32,11 +33,22 @@ fun PdfReaderApp() {
                 runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
                 libraryViewModel.importDocument(uri) { selectedDocumentId = it.id }
             },
-            onOpen = { selectedDocumentId = it.id },
+            onOpen = {
+                requestedPageIndex = null
+                selectedDocumentId = it.id
+            },
+            onGoToPage = { document, pageIndex ->
+                requestedPageIndex = pageIndex
+                selectedDocumentId = document.id
+            },
             onRemove = libraryViewModel::removeDocument,
         )
     } else {
         BackHandler { selectedDocumentId = null }
-        ReaderScreen(document = selected, onBack = { selectedDocumentId = null })
+        ReaderScreen(
+            document = selected,
+            initialPageIndex = requestedPageIndex,
+            onBack = { selectedDocumentId = null },
+        )
     }
 }

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.SelectAll
@@ -51,7 +52,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -59,7 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -74,11 +74,13 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.pdf.PdfPoint
 import androidx.pdf.SandboxedPdfLoader
 import androidx.pdf.ExperimentalPdfApi
@@ -95,6 +97,8 @@ import com.acaba.pdfreader.sync.AnnotationSyncWorker
 import com.acaba.pdfreader.sync.PdfDocumentLocks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -107,7 +111,11 @@ private const val HIGHLIGHT_OPACITY = 0.28f
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalPdfApi::class)
 @Composable
-fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
+fun ReaderScreen(
+    document: PdfDocumentEntity,
+    initialPageIndex: Int? = null,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val app = context.applicationContext as PdfReaderApplication
     val repository = app.repository
@@ -115,6 +123,7 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     val viewerState = rememberPdfViewerState()
     val strokes by repository.observeStrokes(document.id).collectAsStateWithLifecycle(emptyList())
     var openAttempt by rememberSaveable { mutableStateOf(0) }
+    val textEngine = remember(document.uri) { PdfTextEngine(context.contentResolver, Uri.parse(document.uri)) }
     val pdfLoad = produceState<PdfLoad>(initialValue = PdfLoad.Loading, document.uri, openAttempt) {
         value = PdfLoad.Loading
         var session: PdfReadSession? = null
@@ -125,20 +134,32 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
                 try {
                     val pdf = SandboxedPdfLoader(context, Dispatchers.IO)
                         .openDocument(Uri.parse(document.uri), null)
-                    PdfReadSession(pdf, lock)
+                    // Keep ownership before crossing the cancellable dispatcher boundary.
+                    PdfReadSession(pdf, lock).also {
+                        session = it
+                        require(pdf.pageCount > 0) { "El PDF no contiene páginas." }
+                    }
                 } catch (error: Throwable) {
-                    lock.unlock()
+                    if (session == null) lock.unlock()
                     throw error
                 }
             }
-            session = openedSession
             value = PdfLoad.Ready(openedSession)
+            awaitCancellation()
         } catch (cancelled: CancellationException) {
-            session?.close()
             throw cancelled
         } catch (error: Throwable) {
-            session?.close()
             value = PdfLoad.Error(error)
+        } finally {
+            try {
+                try {
+                    textEngine.close()
+                } finally {
+                    session?.close()
+                }
+            } finally {
+                AnnotationSyncWorker.enqueue(context, document.id)
+            }
         }
     }
     val pdfSession = (pdfLoad.value as? PdfLoad.Ready)?.session
@@ -147,32 +168,22 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var highlightMode by rememberSaveable { mutableStateOf(false) }
+    var goToPageOpen by rememberSaveable { mutableStateOf(false) }
     var colorArgb by rememberSaveable { mutableStateOf(Yellow.toArgb()) }
     var width by rememberSaveable { mutableStateOf(8f) }
-    var savedPage by rememberSaveable(document.id) { mutableIntStateOf(document.lastPageIndex) }
-    var savedZoom by rememberSaveable(document.id) { mutableStateOf(1f) }
-    var stateRestored by remember { mutableStateOf(false) }
+    var savedPage by rememberSaveable(document.id, initialPageIndex) {
+        mutableIntStateOf(initialPageIndex ?: document.lastPageIndex)
+    }
+    var stateRestored by remember(pdfDocument) { mutableStateOf(false) }
+    var viewerSize by remember(pdfDocument) { mutableStateOf(IntSize.Zero) }
     var lastOrientation by remember { mutableIntStateOf(orientation) }
     var selectedGlyphs by remember { mutableStateOf<List<TextGlyph>>(emptyList()) }
     var selectedText by remember { mutableStateOf("") }
     var selectionStart by remember { mutableStateOf<Offset?>(null) }
     var selectionEnd by remember { mutableStateOf<Offset?>(null) }
-    val textEngine = remember(document.uri) { PdfTextEngine(context.contentResolver, Uri.parse(document.uri)) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val clipboard = LocalClipboardManager.current
-    val latestPdfSession by rememberUpdatedState(pdfSession)
-
-    DisposableEffect(document.id) {
-        onDispose {
-            runCatching { textEngine.close() }
-            try {
-                latestPdfSession?.close()
-            } finally {
-                AnnotationSyncWorker.enqueue(context, document.id)
-            }
-        }
-    }
 
     LaunchedEffect(selectionStart, selectionEnd) {
         val start = selectionStart
@@ -187,10 +198,9 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(viewerState.firstVisiblePage, viewerState.zoom, pdfDocument, stateRestored) {
-        if (stateRestored && pdfDocument != null) {
+    LaunchedEffect(viewerState.firstVisiblePage, pdfDocument, stateRestored) {
+        if (stateRestored && pdfDocument != null && viewerState.visiblePagesCount > 0) {
             savedPage = viewerState.firstVisiblePage.coerceIn(0, pdfDocument.pageCount - 1)
-            savedZoom = viewerState.zoom
             repository.updateReadingProgress(document.id, savedPage, pdfDocument.pageCount)
         }
     }
@@ -199,8 +209,17 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
         if (pdfDocument != null) {
             stateRestored = false
             savedPage = savedPage.coerceIn(0, pdfDocument.pageCount - 1)
-            runCatching { viewerState.scrollToPage(savedPage) }
-            viewerState.zoomScroll { zoomTo(savedZoom) }
+            // Opening the document is asynchronous and precedes AndroidView attachment/layout.
+            // Navigation before then is silently ignored by PdfViewerState. Let PdfView
+            // calculate its natural fit scale; zoom=1 is pixels per PDF point, not fit-to-width.
+            snapshotFlow {
+                viewerSize.width > 0 && viewerSize.height > 0 && viewerState.visiblePagesCount > 0
+            }.first { it }
+            viewerState.scrollToPage(savedPage)
+            snapshotFlow {
+                savedPage >= viewerState.firstVisiblePage &&
+                    savedPage < viewerState.firstVisiblePage + viewerState.visiblePagesCount
+            }.first { it }
             repository.updateReadingProgress(document.id, savedPage, pdfDocument.pageCount)
             stateRestored = true
         }
@@ -216,7 +235,7 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
         }
     }
 
-    val viewerModifier = Modifier.fillMaxSize().drawWithContent {
+    val viewerModifier = Modifier.fillMaxSize().onSizeChanged { viewerSize = it }.drawWithContent {
         if (!darkMode) {
             drawContent()
         } else {
@@ -241,6 +260,12 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
                     title = { Text(document.displayName, maxLines = 1) },
                     navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Volver") } },
                     actions = {
+                        IconButton(
+                            enabled = pdfDocument != null,
+                            onClick = { goToPageOpen = true },
+                        ) {
+                            Icon(Icons.Default.FindInPage, contentDescription = "Ir a página")
+                        }
                         IconButton(onClick = { controlsVisible = false }) {
                             Icon(Icons.Default.Fullscreen, contentDescription = "Ocultar controles")
                         }
@@ -345,6 +370,22 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
                 Icon(Icons.Default.FullscreenExit, contentDescription = "Mostrar controles")
             }
         }
+    }
+    if (goToPageOpen && pdfDocument != null) {
+        GoToPageDialog(
+            pageCount = pdfDocument.pageCount,
+            currentPage = savedPage + 1,
+            onDismiss = { goToPageOpen = false },
+            onConfirm = { pageIndex ->
+                goToPageOpen = false
+                scope.launch {
+                    val targetPage = pageIndex.coerceIn(0, pdfDocument.pageCount - 1)
+                    viewerState.scrollToPage(targetPage)
+                    savedPage = targetPage
+                    repository.updateReadingProgress(document.id, targetPage, pdfDocument.pageCount)
+                }
+            },
+        )
     }
 }
 
