@@ -5,6 +5,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +27,8 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.SelectAll
@@ -48,6 +52,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -78,14 +83,18 @@ import com.acaba.pdfreader.data.StrokePoint
 import com.acaba.pdfreader.pdf.PdfTextEngine
 import com.acaba.pdfreader.pdf.TextGlyph
 import com.acaba.pdfreader.sync.AnnotationSyncWorker
+import com.acaba.pdfreader.sync.PdfDocumentLocks
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.hypot
 
-private val Yellow = Color(0xFFFFF000)
+private val Yellow = Color(0xFFFFFF00)
 private val Green = Color(0xFF39FF14)
 private val Blue = Color(0xFF00E5FF)
+private const val HIGHLIGHT_OPACITY = 0.28f
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalPdfApi::class)
 @Composable
@@ -97,14 +106,35 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     val strokes by repository.observeStrokes(document.id).collectAsStateWithLifecycle(emptyList())
     var openAttempt by rememberSaveable { mutableStateOf(0) }
     val pdfLoad = produceState<PdfLoad>(initialValue = PdfLoad.Loading, document.uri, openAttempt) {
-        value = runCatching {
-            withContext(Dispatchers.IO) {
-                SandboxedPdfLoader(context, Dispatchers.IO).openDocument(Uri.parse(document.uri), null)
+        value = PdfLoad.Loading
+        var session: PdfReadSession? = null
+        try {
+            val openedSession = withContext(Dispatchers.IO) {
+                val lock = PdfDocumentLocks.forDocument(document.id)
+                lock.lock()
+                try {
+                    val pdf = SandboxedPdfLoader(context, Dispatchers.IO)
+                        .openDocument(Uri.parse(document.uri), null)
+                    PdfReadSession(pdf, lock)
+                } catch (error: Throwable) {
+                    lock.unlock()
+                    throw error
+                }
             }
-        }.fold({ PdfLoad.Ready(it) }, { PdfLoad.Error(it) })
+            session = openedSession
+            value = PdfLoad.Ready(openedSession)
+        } catch (cancelled: CancellationException) {
+            session?.close()
+            throw cancelled
+        } catch (error: Throwable) {
+            session?.close()
+            value = PdfLoad.Error(error)
+        }
     }
-    val pdfDocument = (pdfLoad.value as? PdfLoad.Ready)?.document
+    val pdfSession = (pdfLoad.value as? PdfLoad.Ready)?.session
+    val pdfDocument = pdfSession?.document
     var darkMode by rememberSaveable { mutableStateOf(false) }
+    var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var highlightMode by rememberSaveable { mutableStateOf(false) }
     var colorArgb by rememberSaveable { mutableStateOf(Yellow.toArgb()) }
@@ -120,15 +150,17 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val clipboard = LocalClipboardManager.current
+    val latestPdfSession by rememberUpdatedState(pdfSession)
 
-    DisposableEffect(document.uri) {
+    DisposableEffect(document.id) {
         onDispose {
-            textEngine.close()
-            AnnotationSyncWorker.enqueue(context, document.id)
+            runCatching { textEngine.close() }
+            try {
+                latestPdfSession?.close()
+            } finally {
+                AnnotationSyncWorker.enqueue(context, document.id)
+            }
         }
-    }
-    DisposableEffect(pdfDocument) {
-        onDispose { pdfDocument?.close() }
     }
 
     LaunchedEffect(selectionStart, selectionEnd) {
@@ -177,109 +209,134 @@ fun ReaderScreen(document: PdfDocumentEntity, onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(document.displayName, maxLines = 1) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Volver") } },
-                actions = {
-                    IconButton(onClick = { darkMode = !darkMode }) { Icon(if (darkMode) Icons.Default.LightMode else Icons.Default.DarkMode, contentDescription = "Modo oscuro") }
-                    IconButton(onClick = {
-                        if (selectionMode) {
-                            selectionMode = false
-                            selectionStart = null
-                            selectionEnd = null
-                            selectedGlyphs = emptyList()
-                            selectedText = ""
-                        } else {
-                            selectionMode = true
-                            highlightMode = false
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                if (controlsVisible) TopAppBar(
+                    title = { Text(document.displayName, maxLines = 1) },
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Volver") } },
+                    actions = {
+                        IconButton(onClick = { controlsVisible = false }) {
+                            Icon(Icons.Default.Fullscreen, contentDescription = "Ocultar controles")
                         }
-                    }) { Icon(Icons.Default.SelectAll, contentDescription = "Seleccionar texto") }
-                    IconButton(onClick = {
-                        if (!document.canWrite) scope.launch { snackbar.showSnackbar("Este proveedor es de solo lectura") }
-                        else {
-                            highlightMode = !highlightMode
-                            selectionMode = false
+                        IconButton(onClick = { darkMode = !darkMode }) { Icon(if (darkMode) Icons.Default.LightMode else Icons.Default.DarkMode, contentDescription = "Modo oscuro") }
+                        IconButton(onClick = {
+                            if (selectionMode) {
+                                selectionMode = false
+                                selectionStart = null
+                                selectionEnd = null
+                                selectedGlyphs = emptyList()
+                                selectedText = ""
+                            } else {
+                                selectionMode = true
+                                highlightMode = false
+                            }
+                        }) { Icon(Icons.Default.SelectAll, contentDescription = "Seleccionar texto") }
+                        IconButton(onClick = {
+                            if (!document.canWrite) scope.launch { snackbar.showSnackbar("Este proveedor es de solo lectura") }
+                            else {
+                                highlightMode = !highlightMode
+                                selectionMode = false
+                            }
+                        }) { Icon(Icons.Default.Highlight, contentDescription = "Subrayar") }
+                    },
+                )
+            },
+            snackbarHost = { SnackbarHost(snackbar) },
+            bottomBar = {
+                if (selectionMode && selectedText.isNotBlank()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString(selectedText))
+                            scope.launch { snackbar.showSnackbar("Texto copiado") }
+                        }) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null)
+                            Text(" Copiar")
                         }
-                    }) { Icon(Icons.Default.Highlight, contentDescription = "Subrayar") }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            if (selectionMode && selectedText.isNotBlank()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = {
-                        clipboard.setText(AnnotatedString(selectedText))
-                        scope.launch { snackbar.showSnackbar("Texto copiado") }
-                    }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = null)
-                        Text(" Copiar")
+                    }
+                } else if (highlightMode) {
+                    HighlightControls(colorArgb, width, onColor = { colorArgb = it }, onWidth = { width = it })
+                }
+            },
+        ) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                when (val load = pdfLoad.value) {
+                    PdfLoad.Loading -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        CircularProgressIndicator()
+                        Text("Abriendo PDF…", Modifier.padding(top = 12.dp))
+                    }
+                    is PdfLoad.Error -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        Text("No se puede acceder a este PDF.", style = MaterialTheme.typography.titleMedium)
+                        Text(load.error.message ?: "El URI fue revocado o el archivo no es válido.", Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { openAttempt++ }, Modifier.padding(top = 12.dp)) { Text("Reintentar") }
+                        TextButton(onClick = onBack) { Text("Volver") }
+                    }
+                    is PdfLoad.Ready -> {
+                        PdfViewer(pdfDocument = pdfDocument, state = viewerState, modifier = viewerModifier)
+                        HighlightOverlay(
+                            viewerState = viewerState,
+                            strokes = strokes,
+                            selectionGlyphs = selectedGlyphs,
+                            selectionStart = selectionStart,
+                            selectionEnd = selectionEnd,
+                            highlightMode = highlightMode,
+                            selectionMode = selectionMode,
+                            colorArgb = colorArgb,
+                            width = width,
+                            onStroke = { page, points ->
+                                scope.launch {
+                                    repository.addStroke(
+                                        HighlightStrokeEntity(
+                                            documentId = document.id,
+                                            pageIndex = page,
+                                            colorArgb = colorArgb,
+                                            widthPoints = width,
+                                            points = points,
+                                        ),
+                                    )
+                                    AnnotationSyncWorker.enqueue(context, document.id)
+                                }
+                            },
+                            onSelection = { selectionStart = it.first; selectionEnd = it.second },
+                        )
                     }
                 }
-            } else if (highlightMode) {
-                HighlightControls(colorArgb, width, darkMode, onColor = { colorArgb = it }, onWidth = { width = it })
             }
-        },
-    ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when (val load = pdfLoad.value) {
-                PdfLoad.Loading -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    CircularProgressIndicator()
-                    Text("Abriendo PDF…", Modifier.padding(top = 12.dp))
-                }
-                is PdfLoad.Error -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("No se puede acceder a este PDF.", style = MaterialTheme.typography.titleMedium)
-                    Text(load.error.message ?: "El URI fue revocado o el archivo no es válido.", Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = { openAttempt++ }, Modifier.padding(top = 12.dp)) { Text("Reintentar") }
-                    TextButton(onClick = onBack) { Text("Volver") }
-                }
-                is PdfLoad.Ready -> {
-                PdfViewer(pdfDocument = pdfDocument, state = viewerState, modifier = viewerModifier)
-                HighlightOverlay(
-                    viewerState = viewerState,
-                    strokes = strokes,
-                    darkMode = darkMode,
-                    selectionGlyphs = selectedGlyphs,
-                    selectionStart = selectionStart,
-                    selectionEnd = selectionEnd,
-                    highlightMode = highlightMode,
-                    selectionMode = selectionMode,
-                    colorArgb = colorArgb,
-                    width = width,
-                    onStroke = { page, points ->
-                        scope.launch {
-                            repository.addStroke(
-                                HighlightStrokeEntity(
-                                    documentId = document.id,
-                                    pageIndex = page,
-                                    colorArgb = colorArgb,
-                                    widthPoints = width,
-                                    points = points,
-                                ),
-                            )
-                            AnnotationSyncWorker.enqueue(context, document.id)
-                        }
-                    },
-                    onSelection = { selectionStart = it.first; selectionEnd = it.second },
-                )
-                }
+        }
+        if (!controlsVisible) {
+            IconButton(
+                onClick = { controlsVisible = true },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(8.dp)
+                    .size(40.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f), CircleShape),
+            ) {
+                Icon(Icons.Default.FullscreenExit, contentDescription = "Mostrar controles")
             }
         }
     }
 }
 
 @Composable
-private fun HighlightControls(colorArgb: Int, width: Float, darkMode: Boolean, onColor: (Int) -> Unit, onWidth: (Float) -> Unit) {
+private fun HighlightControls(colorArgb: Int, width: Float, onColor: (Int) -> Unit, onWidth: (Float) -> Unit) {
     val colors = listOf(Yellow, Green, Blue)
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Brush, contentDescription = null)
             colors.forEach { color ->
-                val actual = if (darkMode) Color(1f - color.red, 1f - color.green, 1f - color.blue, color.alpha) else color
+                val selected = color.toArgb() == colorArgb
                 Box(
-                    Modifier.size(30.dp).background(actual, CircleShape).clickable { onColor(color.toArgb()) },
+                    Modifier
+                        .size(30.dp)
+                        .background(color, CircleShape)
+                        .border(
+                            width = if (selected) 3.dp else 1.dp,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                            shape = CircleShape,
+                        )
+                        .clickable { onColor(color.toArgb()) },
                 )
             }
             Text("${width.toInt()} pt", style = MaterialTheme.typography.labelMedium)
@@ -293,7 +350,6 @@ private fun HighlightControls(colorArgb: Int, width: Float, darkMode: Boolean, o
 private fun HighlightOverlay(
     viewerState: androidx.pdf.compose.PdfViewerState,
     strokes: List<HighlightStrokeEntity>,
-    darkMode: Boolean,
     selectionGlyphs: List<TextGlyph>,
     selectionStart: Offset?,
     selectionEnd: Offset?,
@@ -381,7 +437,7 @@ private fun HighlightOverlay(
                 if (offset == Offset.Unspecified) return@forEachIndexed
                 if (index == 0) path.moveTo(offset.x, offset.y) else path.lineTo(offset.x, offset.y)
             }
-            drawPath(path, color = adjustedColor(Color(stroke.colorArgb), darkMode), style = Stroke(width = stroke.widthPoints * viewerState.zoom, cap = StrokeCap.Round))
+            drawPath(path, color = highlightColor(stroke.colorArgb), style = Stroke(width = stroke.widthPoints * viewerState.zoom, cap = StrokeCap.Round))
         }
         activePage?.let { page ->
             val path = Path()
@@ -390,7 +446,7 @@ private fun HighlightOverlay(
                 if (offset == Offset.Unspecified) return@forEachIndexed
                 if (index == 0) path.moveTo(offset.x, offset.y) else path.lineTo(offset.x, offset.y)
             }
-            drawPath(path, color = adjustedColor(Color(colorArgb), darkMode), style = Stroke(width = width * viewerState.zoom, cap = StrokeCap.Round))
+            drawPath(path, color = highlightColor(colorArgb), style = Stroke(width = width * viewerState.zoom, cap = StrokeCap.Round))
         }
         selectionGlyphs.forEach { glyph ->
             val left = viewerState.pdfPointToVisibleOffset(PdfPoint(glyph.pageIndex, glyph.left, glyph.top))
@@ -405,9 +461,25 @@ private fun HighlightOverlay(
 
 private sealed interface PdfLoad {
     data object Loading : PdfLoad
-    data class Ready(val document: androidx.pdf.PdfDocument) : PdfLoad
+    data class Ready(val session: PdfReadSession) : PdfLoad
     data class Error(val error: Throwable) : PdfLoad
 }
 
-private fun adjustedColor(color: Color, darkMode: Boolean): Color =
-    if (!darkMode) color else Color(1f - color.red, 1f - color.green, 1f - color.blue, color.alpha)
+private class PdfReadSession(
+    val document: androidx.pdf.PdfDocument,
+    private val lock: kotlinx.coroutines.sync.Mutex,
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            try {
+                document.close()
+            } finally {
+                lock.unlock()
+            }
+        }
+    }
+}
+
+private fun highlightColor(colorArgb: Int): Color = Color(colorArgb).copy(alpha = HIGHLIGHT_OPACITY)

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.room.withTransaction
@@ -85,15 +86,25 @@ class DocumentRepository(
         } ?: error("No se puede leer el PDF")
     }
 
-    fun copyFromFile(document: PdfDocumentEntity, source: File) {
+    fun replaceWithFile(document: PdfDocumentEntity, source: File, recovery: File) {
+        try {
+            writeFile(document, source)
+        } catch (writeError: Throwable) {
+            val recoveryError = runCatching { writeFile(document, recovery) }.exceptionOrNull()
+            if (recoveryError != null) writeError.addSuppressed(recoveryError)
+            throw writeError
+        }
+    }
+
+    private fun writeFile(document: PdfDocumentEntity, source: File) {
+        val descriptor = resolver.openFileDescriptor(uriFor(document), "rwt")
+            ?: error("El proveedor no permite escribir el PDF")
         source.inputStream().use { input ->
-            resolver.openOutputStream(uriFor(document), "wt")?.use { output ->
+            ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
                 input.copyTo(output)
                 output.flush()
-            } ?: error("El proveedor no permite escribir el PDF")
-        }
-        resolver.openFileDescriptor(uriFor(document), "rwt")?.use { descriptor ->
-            descriptor.fileDescriptor.sync()
+                output.fd.sync()
+            }
         }
     }
 

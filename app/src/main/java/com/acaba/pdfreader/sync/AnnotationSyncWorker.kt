@@ -16,9 +16,12 @@ import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.pdmodel.graphics.color.PDColor
 import com.tom_roush.pdfbox.pdmodel.graphics.color.PDDeviceRGB
+import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationMarkup
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDBorderStyleDictionary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -32,39 +35,59 @@ class AnnotationSyncWorker(
         val repository = app.repository
         val document = repository.findDocument(documentId) ?: return@withContext Result.success()
         if (!document.canWrite) return@withContext Result.failure()
-        val pending = repository.pendingStrokes(documentId)
-        if (pending.isEmpty()) return@withContext Result.success()
+        PdfDocumentLocks.forDocument(documentId).withLock {
+            val pending = repository.pendingStrokes(documentId)
+            if (pending.isEmpty()) return@withLock Result.success()
 
-        val folder = File(applicationContext.cacheDir, "annotation-sync").apply { mkdirs() }
-        val source = File(folder, "$documentId-source.pdf")
-        val output = File(folder, "$documentId-output.pdf")
-        try {
-            repository.copyToFile(document, source)
-            PDDocument.load(source).use { pdf ->
-                val existing = pdf.pages.flatMap { page -> page.annotations.mapNotNull { it.annotationName } }.toSet()
-                pending.forEach { stroke ->
-                    if (stroke.annotationId in existing) {
-                        return@forEach
+            val folder = File(applicationContext.cacheDir, "annotation-sync").apply { mkdirs() }
+            val source = File(folder, "$documentId-source.pdf")
+            val output = File(folder, "$documentId-output.pdf")
+            try {
+                source.delete()
+                output.delete()
+                repository.copyToFile(document, source)
+                PDDocument.load(source).use { pdf ->
+                    val existing = pdf.pages.flatMap { page -> page.annotations.mapNotNull { it.annotationName } }.toSet()
+                    pending.forEach { stroke ->
+                        if (stroke.annotationId in existing) {
+                            return@forEach
+                        }
+                        val page = pdf.getPage(stroke.pageIndex)
+                        val annotation = toAnnotation(stroke, page)
+                        page.annotations.add(annotation)
+                        annotation.constructAppearances(pdf)
+                        annotation.normalAppearanceStream?.resources?.let { resources ->
+                            resources.extGStateNames.forEach { name ->
+                                resources.getExtGState(name)?.apply {
+                                    blendMode = BlendMode.MULTIPLY
+                                    setLineCapStyle(1)
+                                }
+                            }
+                        }
                     }
-                    val page = pdf.getPage(stroke.pageIndex)
-                    val annotation = toAnnotation(stroke, page)
-                    page.annotations.add(annotation)
-                    annotation.constructAppearances(pdf)
+                    pdf.save(output)
                 }
-                pdf.save(output)
+                PDDocument.load(output).use { valid ->
+                    check(valid.numberOfPages > 0) { "PDF inválido tras sincronizar" }
+                    val annotationIds = valid.pages
+                        .flatMap { page -> page.annotations.mapNotNull { it.annotationName } }
+                        .toSet()
+                    check(pending.all { it.annotationId in annotationIds }) {
+                        "El PDF validado no contiene todos los subrayados"
+                    }
+                }
+                repository.replaceWithFile(document, output, source)
+                pending.forEach { repository.markStroke(it.annotationId, SyncState.SYNCED) }
+                Result.success()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                pending.forEach { repository.markStroke(it.annotationId, SyncState.ERROR, error.message) }
+                Result.failure()
+            } finally {
+                source.delete()
+                output.delete()
             }
-            PDDocument.load(output).use { valid ->
-                check(valid.numberOfPages > 0) { "PDF inválido tras sincronizar" }
-            }
-            repository.copyFromFile(document, output)
-            pending.forEach { repository.markStroke(it.annotationId, SyncState.SYNCED) }
-            Result.success()
-        } catch (error: Throwable) {
-            pending.forEach { repository.markStroke(it.annotationId, SyncState.ERROR, error.message) }
-            Result.retry()
-        } finally {
-            source.delete()
-            output.delete()
         }
     }
 
@@ -87,12 +110,13 @@ class AnnotationSyncWorker(
         annotation.rectangle = PDRectangle(left, bottom, maxOf(1f, right - left), maxOf(1f, top - bottom))
         val color = Color.valueOf(stroke.colorArgb)
         annotation.color = PDColor(floatArrayOf(color.red() / 255f, color.green() / 255f, color.blue() / 255f), PDDeviceRGB.INSTANCE)
-        annotation.constantOpacity = 0.35f
+        annotation.constantOpacity = HIGHLIGHT_OPACITY
         annotation.setBorderStyle(PDBorderStyleDictionary().apply { setWidth(stroke.widthPoints) })
         return annotation
     }
 
     companion object {
+        private const val HIGHLIGHT_OPACITY = 0.28f
         private const val KEY_DOCUMENT_ID = "documentId"
 
         fun enqueue(context: Context, documentId: String) {
@@ -101,7 +125,7 @@ class AnnotationSyncWorker(
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 "pdf-annotation-$documentId",
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                ExistingWorkPolicy.KEEP,
                 request,
             )
         }
