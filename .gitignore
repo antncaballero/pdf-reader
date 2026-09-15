@@ -1,1 +1,5 @@
 user-stories.md
+.gradle/
+build/
+app/build/
+local.properties

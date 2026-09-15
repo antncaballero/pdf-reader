@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name">PDF Reader</string>
+    <string name="library_title">Mis PDFs</string>
+    <string name="import_pdf">Importar PDF</string>
+    <string name="empty_library">Todavía no tienes PDFs</string>
+    <string name="empty_library_hint">Importa un archivo para empezar a leer.</string>
+    <string name="remove_pdf">Quitar de la biblioteca</string>
+    <string name="remove_pdf_message">El archivo original no se borrará. Los subrayados ya guardados permanecerán en él.</string>
+    <string name="cancel">Cancelar</string>
+    <string name="remove">Quitar</string>
+    <string name="reader_back">Volver a la biblioteca</string>
+    <string name="dark_mode">Modo oscuro</string>
+    <string name="selection_mode">Seleccionar texto</string>
+    <string name="highlight_mode">Subrayar</string>
+    <string name="copy">Copiar</string>
+    <string name="copy_success">Texto copiado</string>
+    <string name="read_only">Este archivo es de solo lectura; los subrayados están desactivados.</string>
+    <string name="document_unavailable">No se puede acceder a este PDF.</string>
+    <string name="retry">Reintentar</string>
+    <string name="unknown_error">No se pudo abrir el PDF.</string>
+    <string name="import_error">No se pudo importar el PDF.</string>
+    <string name="remove_error">No se pudo quitar el PDF.</string>
+</resources>
