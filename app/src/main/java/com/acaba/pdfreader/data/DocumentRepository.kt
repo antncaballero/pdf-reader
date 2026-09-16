@@ -31,7 +31,10 @@ class DocumentRepository(
     suspend fun findDocument(id: String): PdfDocumentEntity? = database.documentDao().findById(id)
 
     suspend fun pendingStrokes(documentId: String): List<HighlightStrokeEntity> =
-        database.strokeDao().pendingForDocument(documentId)
+        database.strokeDao().pendingForDocument(documentId, CURRENT_APPEARANCE_VERSION)
+
+    suspend fun allStrokes(documentId: String): List<HighlightStrokeEntity> =
+        database.strokeDao().allForDocument(documentId)
 
     suspend fun import(uri: Uri): PdfDocumentEntity {
         val uriString = uri.toString()
@@ -61,6 +64,19 @@ class DocumentRepository(
 
     suspend fun markStroke(annotationId: String, state: SyncState, error: String? = null) {
         database.strokeDao().updateState(annotationId, state, error)
+    }
+
+    suspend fun markStrokesForDeletion(annotationIds: Collection<String>) {
+        if (annotationIds.isEmpty()) return
+        database.strokeDao().markDeletePending(annotationIds.toList())
+    }
+
+    suspend fun markStrokeSynced(annotationId: String) {
+        database.strokeDao().markSynced(annotationId, CURRENT_APPEARANCE_VERSION)
+    }
+
+    suspend fun completeStrokeDeletion(annotationId: String) {
+        database.strokeDao().deleteCompleted(annotationId)
     }
 
     suspend fun updateReadingProgress(documentId: String, pageIndex: Int, pageCount: Int) {
@@ -155,6 +171,10 @@ class DocumentRepository(
     }
 
     private data class Metadata(val name: String, val size: Long, val lastModified: Long)
+
+    companion object {
+        const val CURRENT_APPEARANCE_VERSION = 1
+    }
 }
 
 private fun Cursor.getStringOrNull(index: Int): String? = if (index >= 0 && !isNull(index)) getString(index) else null

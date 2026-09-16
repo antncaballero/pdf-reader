@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.Highlight
+import androidx.compose.material.icons.filled.HighlightOff
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material3.CircularProgressIndicator
@@ -52,6 +53,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -86,6 +88,9 @@ import androidx.pdf.SandboxedPdfLoader
 import androidx.pdf.ExperimentalPdfApi
 import androidx.pdf.compose.PdfViewer
 import androidx.pdf.compose.rememberPdfViewerState
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.acaba.pdfreader.PdfReaderApplication
 import com.acaba.pdfreader.data.HighlightStrokeEntity
@@ -108,6 +113,7 @@ private val Yellow = Color(0xFFFFFF00)
 private val Green = Color(0xFF39FF14)
 private val Blue = Color(0xFF00E5FF)
 private const val HIGHLIGHT_OPACITY = 0.28f
+private const val ERASER_RADIUS_DP = 18f
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalPdfApi::class)
 @Composable
@@ -119,12 +125,31 @@ fun ReaderScreen(
     val context = LocalContext.current
     val app = context.applicationContext as PdfReaderApplication
     val repository = app.repository
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var appVisible by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> appVisible = true
+                Lifecycle.Event.ON_STOP -> appVisible = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val orientation = LocalConfiguration.current.orientation
     val viewerState = rememberPdfViewerState()
     val strokes by repository.observeStrokes(document.id).collectAsStateWithLifecycle(emptyList())
     var openAttempt by rememberSaveable { mutableStateOf(0) }
     val textEngine = remember(document.uri) { PdfTextEngine(context.contentResolver, Uri.parse(document.uri)) }
-    val pdfLoad = produceState<PdfLoad>(initialValue = PdfLoad.Loading, document.uri, openAttempt) {
+    val pdfLoad = produceState<PdfLoad>(initialValue = PdfLoad.Loading, document.uri, openAttempt, appVisible) {
+        if (!appVisible) {
+            value = PdfLoad.Suspended
+            return@produceState
+        }
         value = PdfLoad.Loading
         var session: PdfReadSession? = null
         try {
@@ -168,6 +193,7 @@ fun ReaderScreen(
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var highlightMode by rememberSaveable { mutableStateOf(false) }
+    var eraserMode by rememberSaveable { mutableStateOf(false) }
     var goToPageOpen by rememberSaveable { mutableStateOf(false) }
     var colorArgb by rememberSaveable { mutableStateOf(Yellow.toArgb()) }
     var width by rememberSaveable { mutableStateOf(8f) }
@@ -282,6 +308,7 @@ fun ReaderScreen(
                             } else {
                                 selectionMode = true
                                 highlightMode = false
+                                eraserMode = false
                             }
                         }) { Icon(Icons.Default.SelectAll, contentDescription = "Seleccionar texto") }
                         IconButton(onClick = {
@@ -289,8 +316,23 @@ fun ReaderScreen(
                             else {
                                 highlightMode = !highlightMode
                                 selectionMode = false
+                                eraserMode = false
                             }
                         }) { Icon(Icons.Default.Highlight, contentDescription = "Subrayar") }
+                        IconButton(onClick = {
+                            if (!document.canWrite) scope.launch { snackbar.showSnackbar("Este proveedor es de solo lectura") }
+                            else {
+                                eraserMode = !eraserMode
+                                highlightMode = false
+                                selectionMode = false
+                            }
+                        }) {
+                            Icon(
+                                Icons.Default.HighlightOff,
+                                contentDescription = "Borrar subrayados",
+                                tint = if (eraserMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                     },
                 )
             },
@@ -323,6 +365,7 @@ fun ReaderScreen(
                         TextButton(onClick = { openAttempt++ }, Modifier.padding(top = 12.dp)) { Text("Reintentar") }
                         TextButton(onClick = onBack) { Text("Volver") }
                     }
+                    PdfLoad.Suspended -> Unit
                     is PdfLoad.Ready -> {
                         PdfViewer(pdfDocument = pdfDocument, state = viewerState, modifier = viewerModifier)
                         HighlightOverlay(
@@ -333,6 +376,7 @@ fun ReaderScreen(
                             selectionEnd = selectionEnd,
                             highlightMode = highlightMode,
                             selectionMode = selectionMode,
+                            eraserMode = eraserMode,
                             colorArgb = colorArgb,
                             width = width,
                             onStroke = { page, points ->
@@ -346,6 +390,12 @@ fun ReaderScreen(
                                             points = points,
                                         ),
                                     )
+                                    AnnotationSyncWorker.enqueue(context, document.id)
+                                }
+                            },
+                            onErase = { annotationIds ->
+                                scope.launch {
+                                    repository.markStrokesForDeletion(annotationIds)
                                     AnnotationSyncWorker.enqueue(context, document.id)
                                 }
                             },
@@ -427,15 +477,88 @@ private fun HighlightOverlay(
     selectionEnd: Offset?,
     highlightMode: Boolean,
     selectionMode: Boolean,
+    eraserMode: Boolean,
     colorArgb: Int,
     width: Float,
     onStroke: (Int, List<StrokePoint>) -> Unit,
+    onErase: (Set<String>) -> Unit,
     onSelection: (Pair<Offset, Offset>) -> Unit,
 ) {
     var activePage by remember { mutableStateOf<Int?>(null) }
     var activePoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
+    var hiddenIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val gestureScope = rememberCoroutineScope()
+    val eraserRadiusPx = with(androidx.compose.ui.platform.LocalDensity.current) { ERASER_RADIUS_DP.dp.toPx() }
+
+    LaunchedEffect(strokes) {
+        val visibleIds = strokes.mapTo(mutableSetOf()) { it.annotationId }
+        hiddenIds = hiddenIds intersect visibleIds
+    }
+
     val pointerModifier = when {
+        eraserMode -> Modifier.pointerInput(viewerState, strokes, eraserRadiusPx) {
+            awaitEachGesture {
+                val down = awaitFirstDown()
+                val erased = linkedSetOf<String>()
+                var canceled = false
+                var multiTouch = false
+                var previousCentroid: Offset? = null
+                var previousDistance = 0f
+
+                fun inspect(position: Offset) {
+                    val point = viewerState.visibleOffsetToPdfPoint(position) ?: return
+                    val tolerance = eraserRadiusPx / viewerState.zoom
+                    strokes.asSequence()
+                        .filter { it.annotationId !in hiddenIds && it.pageIndex == point.pageNum }
+                        .filter { stroke ->
+                            strokeIntersects(
+                                stroke,
+                                StrokePoint(point.x, point.y),
+                                tolerance,
+                            )
+                        }
+                        .forEach { erased += it.annotationId }
+                    if (erased.isNotEmpty()) hiddenIds = hiddenIds + erased
+                }
+
+                inspect(down.position)
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.changes.size > 1) {
+                        multiTouch = true
+                        canceled = true
+                        val firstPointer = event.changes[0].position
+                        val secondPointer = event.changes[1].position
+                        val centroid = (firstPointer + secondPointer) / 2f
+                        val distance = hypot(secondPointer.x - firstPointer.x, secondPointer.y - firstPointer.y)
+                        if (previousCentroid != null && previousDistance > 0f) {
+                            val factor = (distance / previousDistance).coerceIn(0.85f, 1.15f)
+                            val nextZoom = (viewerState.zoom * factor).coerceIn(1f, 5f)
+                            gestureScope.launch {
+                                viewerState.zoomScroll {
+                                    zoomTo(nextZoom)
+                                    scrollBy(centroid - previousCentroid!!)
+                                }
+                            }
+                        }
+                        previousCentroid = centroid
+                        previousDistance = distance
+                        event.changes.forEach { it.consume() }
+                        if (event.changes.none { it.pressed }) break
+                        continue
+                    }
+                    if (multiTouch) {
+                        if (event.changes.none { it.pressed }) break
+                        continue
+                    }
+                    val change = event.changes.first()
+                    inspect(change.position)
+                    change.consume()
+                    if (!change.pressed) break
+                }
+                if (!canceled && erased.isNotEmpty()) onErase(erased)
+            }
+        }
         highlightMode -> Modifier.pointerInput(viewerState, colorArgb, width) {
             awaitEachGesture {
                 val down = awaitFirstDown()
@@ -503,6 +626,7 @@ private fun HighlightOverlay(
 
     Canvas(Modifier.fillMaxSize().then(pointerModifier)) {
         strokes.forEach { stroke ->
+            if (stroke.annotationId in hiddenIds) return@forEach
             val path = Path()
             stroke.points.forEachIndexed { index, point ->
                 val offset = viewerState.pdfPointToVisibleOffset(PdfPoint(stroke.pageIndex, point.x, point.y))
@@ -531,8 +655,27 @@ private fun HighlightOverlay(
     }
 }
 
+private fun strokeIntersects(stroke: HighlightStrokeEntity, point: StrokePoint, tolerance: Float): Boolean {
+    val radius = tolerance + stroke.widthPoints / 2f
+    return stroke.points.zipWithNext().any { (start, end) ->
+        distanceToSegment(point, start, end) <= radius
+    }
+}
+
+private fun distanceToSegment(point: StrokePoint, start: StrokePoint, end: StrokePoint): Float {
+    val dx = end.x - start.x
+    val dy = end.y - start.y
+    if (dx == 0f && dy == 0f) {
+        return hypot(point.x - start.x, point.y - start.y)
+    }
+    val projection = ((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy)
+    val t = projection.coerceIn(0f, 1f)
+    return hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy))
+}
+
 private sealed interface PdfLoad {
     data object Loading : PdfLoad
+    data object Suspended : PdfLoad
     data class Ready(val session: PdfReadSession) : PdfLoad
     data class Error(val error: Throwable) : PdfLoad
 }

@@ -8,7 +8,9 @@ Lector PDF nativo, personal y offline para Xiaomi con Android 10 (API 29). La ap
 - Visor basado en AndroidX PDF con zoom, desplazamiento, rotación y caché de bitmaps delegados al componente oficial.
 - Selección de texto de una sola página con PDFBox-Android, arrastre de selección y copia al portapapeles.
 - Modo subrayador explícito: amarillo, verde o azul; grosor continuo de 2–20 puntos; los trazos se guardan inmediatamente en Room.
+- Goma de trazos: elimina un subrayado completo al tocarlo o atravesarlo y sincroniza la eliminación con el PDF.
 - Escritura segura en el PDF mediante un trabajo único de WorkManager: copia temporal, incorporación de anotaciones `/Ink` con UUID, validación y sincronización con `fsync`.
+- Apariencias `/Ink` RGB regeneradas para conservar el color en visores PDF externos.
 - Inversión GPU del viewport, manteniendo colores visibles del subrayador, y liberación de documentos/analizadores al salir del lector.
 
 El port Android de PDFBox 2.0.27 no expone una clase pública `PDAnnotationInk`; por ello se genera la misma anotación estándar `/Ink` usando `PDAnnotationMarkup` y su `InkList`, que sí está disponible en el artefacto Android.
@@ -42,4 +44,4 @@ Para esta distribución personal el release se firma con el keystore debug local
 
 ## Límites deliberados
 
-No se incluyen OCR, búsqueda, miniaturas, nube, formularios, firma, notas, goma, lápiz ni edición general. Los PDFs escaneados pueden renderizarse y subrayarse, pero no proporcionan texto para copiar. Un proveedor SAF de solo lectura mantiene la lectura activa y deshabilita el subrayador.
+No se incluyen OCR, búsqueda, miniaturas, nube, formularios, firma, lápiz ni edición general. Los PDFs escaneados pueden renderizarse y subrayarse, pero no proporcionan texto para copiar. Un proveedor SAF de solo lectura mantiene la lectura activa y deshabilita el subrayador y la goma.

@@ -12,6 +12,7 @@
     <string name="dark_mode">Modo oscuro</string>
     <string name="selection_mode">Seleccionar texto</string>
     <string name="highlight_mode">Subrayar</string>
+    <string name="eraser_mode">Borrar subrayados</string>
     <string name="copy">Copiar</string>
     <string name="copy_success">Texto copiado</string>
     <string name="read_only">Este archivo es de solo lectura; los subrayados están desactivados.</string>

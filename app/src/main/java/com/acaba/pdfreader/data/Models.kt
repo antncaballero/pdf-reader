@@ -9,7 +9,7 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import java.util.UUID
 
-enum class SyncState { PENDING, SYNCED, ERROR }
+enum class SyncState { PENDING, SYNCED, ERROR, DELETE_PENDING, DELETE_ERROR }
 
 data class StrokePoint(val x: Float, val y: Float)
 
@@ -51,6 +51,7 @@ data class HighlightStrokeEntity(
     val syncState: SyncState = SyncState.PENDING,
     val lastError: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    val appearanceVersion: Int = 0,
 )
 
 class RoomConverters {

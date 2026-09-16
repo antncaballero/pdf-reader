@@ -1,7 +1,6 @@
 package com.acaba.pdfreader.sync
 
 import android.content.Context
-import android.graphics.Color
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
@@ -19,8 +18,8 @@ import com.tom_roush.pdfbox.pdmodel.graphics.color.PDDeviceRGB
 import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationMarkup
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDBorderStyleDictionary
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -47,20 +46,21 @@ class AnnotationSyncWorker(
                 output.delete()
                 repository.copyToFile(document, source)
                 PDDocument.load(source).use { pdf ->
-                    val existing = pdf.pages.flatMap { page -> page.annotations.mapNotNull { it.annotationName } }.toSet()
                     pending.forEach { stroke ->
-                        if (stroke.annotationId in existing) {
-                            return@forEach
-                        }
-                        val page = pdf.getPage(stroke.pageIndex)
-                        val annotation = toAnnotation(stroke, page)
-                        page.annotations.add(annotation)
-                        annotation.constructAppearances(pdf)
-                        annotation.normalAppearanceStream?.resources?.let { resources ->
-                            resources.extGStateNames.forEach { name ->
-                                resources.getExtGState(name)?.apply {
-                                    blendMode = BlendMode.MULTIPLY
-                                    setLineCapStyle(1)
+                        if (stroke.syncState == SyncState.DELETE_PENDING || stroke.syncState == SyncState.DELETE_ERROR) {
+                            removeAnnotation(pdf, stroke.annotationId)
+                        } else {
+                            removeAnnotation(pdf, stroke.annotationId)
+                            val page = pdf.getPage(stroke.pageIndex)
+                            val annotation = toAnnotation(stroke, page)
+                            page.annotations.add(annotation)
+                            annotation.constructAppearances(pdf)
+                            annotation.normalAppearanceStream?.resources?.let { resources ->
+                                resources.extGStateNames.forEach { name ->
+                                    resources.getExtGState(name)?.apply {
+                                        blendMode = BlendMode.NORMAL
+                                        setLineCapStyle(1)
+                                    }
                                 }
                             }
                         }
@@ -72,18 +72,36 @@ class AnnotationSyncWorker(
                     val annotationIds = valid.pages
                         .flatMap { page -> page.annotations.mapNotNull { it.annotationName } }
                         .toSet()
-                    check(pending.all { it.annotationId in annotationIds }) {
-                        "El PDF validado no contiene todos los subrayados"
+                    check(pending.all { stroke ->
+                        if (stroke.syncState == SyncState.DELETE_PENDING || stroke.syncState == SyncState.DELETE_ERROR) {
+                            stroke.annotationId !in annotationIds
+                        } else {
+                            stroke.annotationId in annotationIds
+                        }
+                    }) {
+                        "El PDF validado no contiene el estado esperado de los subrayados"
                     }
                 }
                 repository.replaceWithFile(document, output, source)
-                pending.forEach { repository.markStroke(it.annotationId, SyncState.SYNCED) }
+                pending.forEach { stroke ->
+                    if (stroke.syncState == SyncState.DELETE_PENDING || stroke.syncState == SyncState.DELETE_ERROR) {
+                        repository.completeStrokeDeletion(stroke.annotationId)
+                    } else {
+                        repository.markStrokeSynced(stroke.annotationId)
+                    }
+                }
                 Result.success()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                pending.forEach { repository.markStroke(it.annotationId, SyncState.ERROR, error.message) }
-                Result.failure()
+                pending.forEach { stroke ->
+                    if (stroke.syncState == SyncState.DELETE_PENDING || stroke.syncState == SyncState.DELETE_ERROR) {
+                        repository.markStroke(stroke.annotationId, SyncState.DELETE_ERROR, error.message)
+                    } else {
+                        repository.markStroke(stroke.annotationId, SyncState.ERROR, error.message)
+                    }
+                }
+                Result.retry()
             } finally {
                 source.delete()
                 output.delete()
@@ -108,12 +126,23 @@ class AnnotationSyncWorker(
         annotation.cosObject.setName(COSName.SUBTYPE, PDAnnotationMarkup.SUB_TYPE_INK)
         annotation.setInkList(arrayOf(pdfPoints.flatMap { it.asIterable() }.toFloatArray()))
         annotation.rectangle = PDRectangle(left, bottom, maxOf(1f, right - left), maxOf(1f, top - bottom))
-        val color = Color.valueOf(stroke.colorArgb)
-        annotation.color = PDColor(floatArrayOf(color.red() / 255f, color.green() / 255f, color.blue() / 255f), PDDeviceRGB.INSTANCE)
+        annotation.color = PDColor(rgbComponents(stroke.colorArgb), PDDeviceRGB.INSTANCE)
         annotation.constantOpacity = HIGHLIGHT_OPACITY
         annotation.setBorderStyle(PDBorderStyleDictionary().apply { setWidth(stroke.widthPoints) })
         return annotation
     }
+
+    private fun removeAnnotation(pdf: PDDocument, annotationId: String) {
+        pdf.pages.forEach { page ->
+            page.annotations.removeAll { it.annotationName == annotationId }
+        }
+    }
+
+    private fun rgbComponents(argb: Int): FloatArray = floatArrayOf(
+        ((argb ushr 16) and 0xFF) / 255f,
+        ((argb ushr 8) and 0xFF) / 255f,
+        (argb and 0xFF) / 255f,
+    )
 
     companion object {
         private const val HIGHLIGHT_OPACITY = 0.28f
