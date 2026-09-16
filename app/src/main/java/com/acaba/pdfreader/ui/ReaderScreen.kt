@@ -239,10 +239,12 @@ fun ReaderScreen(
         if (!darkMode) {
             drawContent()
         } else {
+            // Map the original white PDF background to dark gray and black text
+            // to a softer bone-white instead of using a pure color inversion.
             val filter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(
-                -1f, 0f, 0f, 0f, 255f,
-                0f, -1f, 0f, 0f, 255f,
-                0f, 0f, -1f, 0f, 255f,
+                -0.741176f, 0f, 0f, 0f, 232f,
+                0f, -0.72549f, 0f, 0f, 228f,
+                0f, 0f, -0.701961f, 0f, 222f,
                 0f, 0f, 0f, 1f, 0f,
             )))
             val paint = androidx.compose.ui.graphics.Paint()
